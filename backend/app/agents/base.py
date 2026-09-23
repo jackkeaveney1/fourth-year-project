@@ -33,7 +33,12 @@ _CONCLUDE_TOOL_SPEC = ToolSpec(
         "properties": {
             "summary": {
                 "type": "string",
-                "description": "Your final assessment: what you found/achieved, or why you're stopping.",
+                "description": (
+                    "Your final assessment: what you found/achieved, or why you're stopping. "
+                    "Keep it tight — a short paragraph or a handful of bullet points, under "
+                    "~120 words total. A long summary can overflow the model's own output-token "
+                    "limit mid-JSON and fail the call outright, losing the whole assessment."
+                ),
             }
         },
         "required": ["summary"],

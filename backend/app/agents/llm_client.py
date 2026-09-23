@@ -120,19 +120,35 @@ class GroqLLMClient:
         ]
         messages = [{"role": "system", "content": system_prompt}, *history]
 
-        response = self._client.chat.completions.create(
-            model=self.model,
-            # Some free-tier Groq models cap output-tokens-per-minute as low as
-            # 1000 (separate from the daily quota) — 1024 alone blew past that
-            # limit and 429'd every call. Stay comfortably under it.
-            max_tokens=800,
-            messages=messages,
-            tools=openai_tools,
-            # Forces a tool call every turn — without this, smaller/chattier
-            # models can respond with plain narration text and no call, which
-            # the agent loop would otherwise mistake for "I'm done".
-            tool_choice="required",
-        )
+        import groq
+
+        try:
+            response = self._client.chat.completions.create(
+                model=self.model,
+                # Some free-tier Groq models cap output-tokens-per-minute as low as
+                # 1000 (separate from the daily quota) — 1024 alone blew past that
+                # limit and 429'd every call. Stay comfortably under it.
+                max_tokens=800,
+                messages=messages,
+                tools=openai_tools,
+                # Forces a tool call every turn — without this, smaller/chattier
+                # models can respond with plain narration text and no call, which
+                # the agent loop would otherwise mistake for "I'm done".
+                tool_choice="required",
+            )
+        except groq.APIStatusError as exc:
+            # Groq rejects the whole request with a 400 "tool_use_failed" when
+            # the model either doesn't call a tool despite tool_choice="required",
+            # or its tool-call JSON gets cut off mid-string by max_tokens (e.g. a
+            # long conclude summary). Either way the model's actual generated
+            # text comes back in the error body's `failed_generation` — treat
+            # that as a plain-text response instead of losing the whole run to
+            # an exception that aborts the agent loop with no summary at all.
+            body = exc.body if isinstance(exc.body, dict) else {}
+            failed_generation = (body.get("error") or {}).get("failed_generation")
+            if failed_generation:
+                return LLMResponse(thought=str(failed_generation).strip(), tool_call=None, done=True)
+            raise
 
         message = response.choices[0].message
         # Reasoning models (e.g. gpt-oss) put their actual thinking in a
