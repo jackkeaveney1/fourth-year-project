@@ -98,10 +98,15 @@ class Agent:
 
         while True:
             step_number += 1
+            # On the last step the budget allows, only offer `conclude` — a real
+            # tool call here would just consume the final step and then hit
+            # "BLOCKED: Step budget exhausted" with no summary at all. Forcing
+            # a conclusion instead guarantees the run always ends with the
+            # agent's actual findings, not a guardrail error.
+            out_of_budget = self.guardrails.steps.remaining <= 1
+            available_tools = [_CONCLUDE_TOOL_SPEC] if out_of_budget else [*self.tools.specs(), _CONCLUDE_TOOL_SPEC]
             try:
-                response = self.llm.next_step(
-                    self.system_prompt, history, [*self.tools.specs(), _CONCLUDE_TOOL_SPEC]
-                )
+                response = self.llm.next_step(self.system_prompt, history, available_tools)
             except Exception as exc:  # noqa: BLE001 - surfaced as a terminal trajectory step
                 step = TrajectoryStep(
                     step=step_number,
@@ -155,8 +160,17 @@ class Agent:
             self._emit(step)
 
             history.append({"role": "assistant", "content": response.thought or "(tool call)"})
+            remaining = self.guardrails.steps.remaining
             history.append(
-                {"role": "user", "content": f"Observation: {_truncate_for_history(observation)}"}
+                {
+                    "role": "user",
+                    "content": (
+                        f"Observation: {_truncate_for_history(observation)}\n\n"
+                        f"({remaining} step(s) left before you must conclude — "
+                        "re-reading the same file won't show more of it, move on "
+                        "or wrap up with what you have.)"
+                    ),
+                }
             )
 
             if observation.startswith("BLOCKED"):

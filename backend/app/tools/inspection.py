@@ -17,7 +17,12 @@ from docker.errors import APIError, NotFound
 from app.models.schemas import ToolResult
 from app.tools.base import Tool, ToolSpec
 
-MAX_RESPONSE_CHARS = 2000
+MAX_RESPONSE_CHARS = 700
+"""Kept under base.py's MAX_OBSERVATION_CHARS_FOR_HISTORY (800) so this tool's
+own truncation is the only one that ever fires — a config file cut here and
+then cut *again* when appended to history produced two conflicting truncation
+notes, which made the agent think there was always more to read and burn its
+step budget re-reading the same file instead of moving on."""
 
 
 def _strip_noise(text: str) -> str:
