@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Node / frontend
+node_modules/
+frontend/dist/
+
+# Env / secrets
+.env
+*.local
+
+# Generated per-run compose files
+targets/generated/
+
+# OS
+.DS_Store

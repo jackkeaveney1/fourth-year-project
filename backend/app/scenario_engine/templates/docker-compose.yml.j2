@@ -1,0 +1,40 @@
+{# Rendered per run by scenario_engine/engine.py. Every service in this
+   file lives on a single internal (no-egress) network — see the network
+   block at the bottom. The "attacker" service is where the red/blue
+   agents' shell/recon tools actually execute. #}
+services:
+  attacker:
+    image: cyber-range/agent-runtime:latest
+    container_name: {{ run_id }}-attacker
+    networks:
+      range:
+        ipv4_address: {{ subnet_base }}.10
+    command: ["sleep", "infinity"]
+    labels:
+      cyber_range.scenario: "{{ scenario_id }}"
+      cyber_range.run: "{{ run_id }}"
+
+{% for service in services %}
+  {{ service.name }}:
+    image: {{ service.image }}
+    container_name: {{ run_id }}-{{ service.name }}
+    networks:
+      range:
+        ipv4_address: {{ subnet_base }}.{{ 20 + loop.index0 }}
+{% if service.name == "web" %}
+    environment:
+      SUCCESS_MARKER: "{{ success_marker }}"
+      DB_HOST: db
+{% endif %}
+    labels:
+      cyber_range.scenario: "{{ scenario_id }}"
+      cyber_range.run: "{{ run_id }}"
+{% endfor %}
+
+networks:
+  range:
+    internal: true
+    driver: bridge
+    ipam:
+      config:
+        - subnet: {{ subnet_base }}.0/24
