@@ -10,6 +10,7 @@ between them.
 
 from __future__ import annotations
 
+import re
 import secrets
 import subprocess
 import uuid
@@ -47,8 +48,41 @@ class ScenarioEngine:
 
     def _next_subnet_base(self) -> str:
         # 172.30.<n>.0/24 -- stays well clear of common host/default-bridge ranges.
-        self._subnet_counter = (self._subnet_counter + 1) % 200
-        return f"172.30.{self._subnet_counter}"
+        # The in-memory counter alone isn't enough: a process restart resets
+        # it to 1 even though a network from a previous run's failed
+        # teardown might still hold that exact subnet, so cross-check
+        # against what Docker actually has allocated right now.
+        used = self._used_subnet_indices()
+        for _ in range(200):
+            self._subnet_counter = (self._subnet_counter % 200) + 1
+            if self._subnet_counter not in used:
+                return f"172.30.{self._subnet_counter}"
+        raise ProvisioningError("No free 172.30.<n>.0/24 subnet available for a new range")
+
+    @staticmethod
+    def _used_subnet_indices() -> set[int]:
+        try:
+            ids = subprocess.run(
+                ["docker", "network", "ls", "-q"], capture_output=True, text=True, timeout=15
+            )
+            if ids.returncode != 0:
+                return set()
+            network_ids = ids.stdout.split()
+            if not network_ids:
+                return set()
+            inspected = subprocess.run(
+                ["docker", "network", "inspect", "--format", "{{range .IPAM.Config}}{{.Subnet}} {{end}}", *network_ids],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except (subprocess.SubprocessError, OSError):
+            return set()
+
+        indices = set()
+        for match in re.finditer(r"172\.30\.(\d+)\.0/24", inspected.stdout):
+            indices.add(int(match.group(1)))
+        return indices
 
     def render_compose(self, scenario: Scenario, run_id: str) -> ProvisionedRange:
         template = self._env.get_template("docker-compose.yml.j2")

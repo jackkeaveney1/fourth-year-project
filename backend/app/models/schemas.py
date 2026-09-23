@@ -102,6 +102,33 @@ class ScoreCard(BaseModel):
         return round(100 * self.total_points / self.max_points, 1)
 
 
+class AttackAttempt(BaseModel):
+    """One tool-calling step from the red-team trajectory, reframed as an
+    attack action with a plain success/failure/blocked verdict."""
+
+    step: int
+    action: str
+    """Human-readable action, e.g. 'try_credentials(http://web:8080/login)'."""
+    target: str | None = None
+    outcome: Literal["succeeded", "failed", "blocked"]
+    detail: str
+    """Short excerpt of the observation explaining the outcome."""
+
+
+class AttackReport(BaseModel):
+    """A narrative summary of the red-team run: what was tried, what worked,
+    what didn't, whether the objective was ultimately breached, and how the
+    target could be hardened against what was seen."""
+
+    breached: bool
+    summary: str
+    attempts: list[AttackAttempt]
+    successful_attempts: list[AttackAttempt]
+    failed_attempts: list[AttackAttempt]
+    blocked_attempts: list[AttackAttempt]
+    recommendations: list[str]
+
+
 class RunReport(BaseModel):
     run_id: str
     scenario_id: str
@@ -117,6 +144,14 @@ class RunReport(BaseModel):
     started_at: datetime
     ended_at: datetime | None = None
     scorecard: ScoreCard | None = None
+    blue_team_trajectory: list[TrajectoryStep] = Field(default_factory=list)
+    blue_team_summary: str | None = None
+    """The blue-team agent's final assessment thought, surfaced separately for a quick read."""
+    blue_team_error: str | None = None
+    """Set when the blue-team assessment stopped early on an LLM/tool error rather than
+    reaching a real conclusion (e.g. a provider rate limit) — kept separate from
+    `blue_team_summary` so a crash message is never mistaken for a genuine finding."""
+    attack_report: AttackReport | None = None
 
 
 class LaunchRunRequest(BaseModel):

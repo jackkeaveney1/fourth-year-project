@@ -75,7 +75,11 @@ class NetworkAllowlist:
 
     def check_url(self, url: str) -> None:
         parsed = urlparse(url)
-        host = parsed.hostname
+        # `url` may be a full URL ("http://web:8080/login") or a bare
+        # hostname/IP ("web", as passed by scan_ports) — urlparse only
+        # populates .hostname when a scheme/netloc is present, so fall back
+        # to treating the whole string as the host in the bare case.
+        host = parsed.hostname or (url if "://" not in url else None)
         if host is None:
             raise GuardrailViolation(f"Could not parse host from URL: {url!r}")
 

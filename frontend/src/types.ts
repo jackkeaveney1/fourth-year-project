@@ -60,6 +60,26 @@ export interface ScoreCard {
   max_points: number;
 }
 
+export type AttackOutcome = "succeeded" | "failed" | "blocked";
+
+export interface AttackAttempt {
+  step: number;
+  action: string;
+  target: string | null;
+  outcome: AttackOutcome;
+  detail: string;
+}
+
+export interface AttackReport {
+  breached: boolean;
+  summary: string;
+  attempts: AttackAttempt[];
+  successful_attempts: AttackAttempt[];
+  failed_attempts: AttackAttempt[];
+  blocked_attempts: AttackAttempt[];
+  recommendations: string[];
+}
+
 export interface RunReport {
   run_id: string;
   scenario_id: string;
@@ -75,11 +95,32 @@ export interface RunReport {
   started_at: string;
   ended_at: string | null;
   scorecard: ScoreCard | null;
+  blue_team_trajectory: TrajectoryStep[];
+  blue_team_summary: string | null;
+  blue_team_error: string | null;
+  attack_report: AttackReport | null;
 }
+
+export type RunPhase = "pending" | "provisioning" | "running" | "assessing" | "done";
 
 export interface RunStatusResponse {
   run_id: string;
   status: RunStatus;
+  phase: RunPhase;
+  max_steps: number;
   report: RunReport | null;
   steps_so_far: number;
 }
+
+export interface PhaseEvent {
+  event: "phase";
+  phase: RunPhase;
+  max_steps?: number;
+}
+
+export interface RunCompleteEvent {
+  event: "run_complete";
+  status: RunStatus;
+}
+
+export type LiveMessage = TrajectoryStep | PhaseEvent | RunCompleteEvent;

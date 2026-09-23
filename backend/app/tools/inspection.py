@@ -17,6 +17,23 @@ from docker.errors import APIError, NotFound
 from app.models.schemas import ToolResult
 from app.tools.base import Tool, ToolSpec
 
+MAX_RESPONSE_CHARS = 2000
+
+
+def _strip_noise(text: str) -> str:
+    """Drop full-line comments and blank lines from a config file.
+
+    Stock config files (postgresql.conf, pg_hba.conf, ...) are 90%+ comments
+    — keeping them verbatim in the trajectory burns tokens on every
+    subsequent LLM call for no signal, since the agent history resends the
+    full tool output each turn.
+    """
+    lines = [
+        line for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    return "\n".join(lines)
+
 
 class ReadConfigTool(Tool):
     def __init__(self, docker_client: docker.DockerClient, allowed_containers: set[str]) -> None:
@@ -49,7 +66,11 @@ class ReadConfigTool(Tool):
             return ToolResult(ok=False, output="", error=str(exc))
 
         text = output.decode(errors="replace") if isinstance(output, bytes) else str(output)
-        return ToolResult(ok=exit_code == 0, output=text)
+        stripped = _strip_noise(text)
+        truncated = stripped[:MAX_RESPONSE_CHARS]
+        if len(stripped) > MAX_RESPONSE_CHARS:
+            truncated += f"\n...[truncated, {len(stripped) - MAX_RESPONSE_CHARS} more chars of non-comment lines]"
+        return ToolResult(ok=exit_code == 0, output=truncated)
 
 
 class ListServicesTool(Tool):

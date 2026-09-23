@@ -2,18 +2,17 @@
 
 Bounded by design — a fixed, short candidate list and a hard attempt cap —
 so a misbehaving agent can't turn this into a real brute-force flood even
-inside the isolated range.
+inside the isolated range. Runs via `curl` inside the attacker container,
+same reasoning as `web.py`/`recon.py`.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-import requests
-
-from app.guardrails.policy import GuardrailViolation, NetworkAllowlist
 from app.models.schemas import ToolResult
 from app.tools.base import Tool, ToolSpec
+from app.tools.container_exec import ContainerExecError, exec_in_container
 
 MAX_ATTEMPTS = 25
 
@@ -27,8 +26,9 @@ DEFAULT_CREDENTIALS = [
 
 
 class CredentialStuffTool(Tool):
-    def __init__(self, network: NetworkAllowlist, timeout_s: float = 5.0) -> None:
-        self.network = network
+    def __init__(self, docker_client, attacker_container_name: str, timeout_s: int = 5) -> None:
+        self.docker_client = docker_client
+        self.attacker_container_name = attacker_container_name
         self.timeout_s = timeout_s
         self.spec = ToolSpec(
             name="try_credentials",
@@ -57,27 +57,31 @@ class CredentialStuffTool(Tool):
         pass_field: str = kwargs.get("password_field", "password")
         success_marker: str = kwargs["success_marker"]
 
-        try:
-            self.network.check_url(url)
-        except GuardrailViolation as exc:
-            return ToolResult(ok=False, output="", error=str(exc))
-
         attempts = 0
         for username, password in DEFAULT_CREDENTIALS[:MAX_ATTEMPTS]:
             attempts += 1
+            argv = [
+                "curl",
+                "-s",
+                "--max-time",
+                str(self.timeout_s),
+                "--data-urlencode",
+                f"{user_field}={username}",
+                "--data-urlencode",
+                f"{pass_field}={password}",
+                url,
+            ]
             try:
-                response = requests.post(
-                    url,
-                    data={user_field: username, pass_field: password},
-                    timeout=self.timeout_s,
-                )
-            except requests.RequestException as exc:
-                return ToolResult(ok=False, output="", error=f"Request failed: {exc}")
+                exit_code, output = exec_in_container(self.docker_client, self.attacker_container_name, argv)
+            except ContainerExecError as exc:
+                return ToolResult(ok=False, output="", error=str(exc))
 
-            if success_marker in response.text:
-                return ToolResult(
-                    ok=True,
-                    output=f"Success after {attempts} attempts: {username}:{password}",
-                )
+            if exit_code != 0:
+                return ToolResult(ok=False, output="", error=f"curl exited {exit_code}: {output[:500]}")
 
-        return ToolResult(ok=False, output=f"No valid credentials found in {attempts} attempts")
+            if success_marker in output:
+                return ToolResult(ok=True, output=f"Success after {attempts} attempts: {username}:{password}")
+
+        # ok=True: the tool ran correctly and answered the question asked —
+        # "no valid credentials in this list" is a real result, not a failure.
+        return ToolResult(ok=True, output=f"No valid credentials found in {attempts} attempts")

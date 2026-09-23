@@ -1,4 +1,4 @@
-import type { Difficulty, RunStatusResponse, Scenario, TrajectoryStep } from "./types";
+import type { Difficulty, RunPhase, RunStatus, RunStatusResponse, Scenario, TrajectoryStep } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 const WS_BASE = API_BASE.replace(/^http/, "ws");
@@ -33,21 +33,27 @@ export async function getRun(runId: string): Promise<RunStatusResponse> {
   return res.json();
 }
 
-export function subscribeToRun(
-  runId: string,
-  onStep: (step: TrajectoryStep) => void,
-  onComplete: (status: string) => void,
-): () => void {
+export interface RunSubscriptionHandlers {
+  onStep: (step: TrajectoryStep) => void;
+  onPhase: (phase: RunPhase, maxSteps?: number) => void;
+  onComplete: (status: RunStatus) => void;
+}
+
+export function subscribeToRun(runId: string, handlers: RunSubscriptionHandlers): () => void {
   const ws = new WebSocket(`${WS_BASE}/runs/${runId}/live`);
 
   ws.onmessage = (event) => {
     const data = JSON.parse(event.data);
     if (data.event === "run_complete") {
-      onComplete(data.status);
+      handlers.onComplete(data.status);
       ws.close();
       return;
     }
-    onStep(data as TrajectoryStep);
+    if (data.event === "phase") {
+      handlers.onPhase(data.phase, data.max_steps);
+      return;
+    }
+    handlers.onStep(data as TrajectoryStep);
   };
 
   return () => ws.close();

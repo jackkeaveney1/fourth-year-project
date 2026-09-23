@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from dataclasses import dataclass, field
+from typing import Any
 
 from app.models.schemas import RunReport, RunStatus, Scenario, TrajectoryStep
 
@@ -20,6 +21,10 @@ from app.models.schemas import RunReport, RunStatus, Scenario, TrajectoryStep
 class RunRecord:
     run_id: str
     status: RunStatus = RunStatus.PENDING
+    phase: str = "pending"
+    """Coarse live phase for UI progress: pending -> provisioning -> running -> done.
+    Distinct from `status`, which only takes its final value once `report` is set."""
+    max_steps: int = 0
     report: RunReport | None = None
     trajectory_so_far: list[TrajectoryStep] = field(default_factory=list)
     subscribers: list[asyncio.Queue] = field(default_factory=list)
@@ -45,6 +50,31 @@ class RunStore:
         with self._lock:
             if run_id in self._runs:
                 self._runs[run_id].status = status
+
+    def set_phase(self, run_id: str, phase: str, max_steps: int | None = None) -> None:
+        """Called from the worker thread; pushes a live phase-change event.
+
+        `max_steps` lets a phase transition (e.g. into "assessing") tell
+        subscribers the step budget changed — the blue-team phase has its
+        own, smaller budget than the red-team phase.
+        """
+        with self._lock:
+            record = self._runs.get(run_id)
+            if record is None:
+                return
+            record.phase = phase
+            if max_steps is not None:
+                record.max_steps = max_steps
+            loop = record.loop
+            subscribers = list(record.subscribers)
+
+        if loop is None:
+            return
+        event: dict[str, Any] = {"event": "phase", "phase": phase}
+        if max_steps is not None:
+            event["max_steps"] = max_steps
+        for queue in subscribers:
+            loop.call_soon_threadsafe(queue.put_nowait, event)
 
     def set_report(self, run_id: str, report: RunReport) -> None:
         with self._lock:
