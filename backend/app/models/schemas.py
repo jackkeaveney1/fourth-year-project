@@ -154,8 +154,62 @@ class RunReport(BaseModel):
     attack_report: AttackReport | None = None
 
 
+class LLMProvider(str, Enum):
+    GROQ = "groq"
+    ANTHROPIC = "anthropic"
+    GEMINI = "gemini"
+    AIONLABS = "aionlabs"
+
+
+class LLMSelection(BaseModel):
+    """Picks a provider/model for one team, optionally with the caller's own key.
+
+    `model` and `api_key` are both optional — omitted, they fall back to this
+    provider's server-configured default (see `app/config.py`). `api_key` is
+    never persisted: it's used only to build that run's LLM client and is
+    discarded once the run finishes.
+    """
+
+    provider: LLMProvider
+    model: str | None = None
+    api_key: str | None = None
+
+
+class CustomServiceSpec(BaseModel):
+    name: str
+    """Ignored for role="web"/"db" (forced to those exact names, see
+    scenario_generator.build_custom_scenario); required and used as-is for role="internal"."""
+    role: Literal["web", "db", "internal"]
+    vulnerability_ids: list[str] = Field(default_factory=list)
+    exposed_to: list[str] = Field(default_factory=list)
+
+
+class CustomScenarioRequest(BaseModel):
+    title: str
+    objective: str
+    services: list[CustomServiceSpec]
+
+
+class ImportedScenarioRequest(BaseModel):
+    """Build a scenario from the user's own system (a folder with a Dockerfile)."""
+
+    title: str
+    objective: str
+    build_context: str
+    """Local directory path containing the Dockerfile to build as the target."""
+    app_port: int = Field(default=8080, ge=1, le=65535)
+    include_db: bool = False
+    """Attach the built-in Postgres as a `db` service the imported app can use."""
+
+
 class LaunchRunRequest(BaseModel):
     scenario_id: str
     mode: Literal["agentic", "scripted_baseline"] = "agentic"
     max_steps: int = Field(default=40, ge=1, le=200)
     max_cost_usd: float = Field(default=1.0, gt=0)
+    red_llm: LLMSelection | None = None
+    """Overrides which provider/model/key runs the red-team agent for this run only.
+    Omitted, it falls back to the server's default provider priority chain."""
+    blue_llm: LLMSelection | None = None
+    """Same, for the blue-team agent. Omitted, it falls back to the server's
+    default (a separate Groq model if configured, else the same client as red)."""

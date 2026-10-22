@@ -30,6 +30,18 @@ class RunRecord:
     subscribers: list[asyncio.Queue] = field(default_factory=list)
     loop: asyncio.AbstractEventLoop | None = None
 
+    # Identity of the provisioned range, filled once provisioning starts, so
+    # GET /runs/{id}/infrastructure can map this client-visible run id to the
+    # Docker containers/network (which are labelled with the orchestrator's
+    # own internal run id, not this one). None until the range exists.
+    internal_run_id: str | None = None
+    compose_project: str | None = None
+    subnet_base: str | None = None
+    expected_services: list[str] = field(default_factory=list)
+    """Compose service names we expect to come up (incl. "attacker"), in
+    display order — lets the infra endpoint show a not-yet-created container
+    as "pending" instead of simply omitting it."""
+
 
 class RunStore:
     def __init__(self) -> None:
@@ -75,6 +87,27 @@ class RunStore:
             event["max_steps"] = max_steps
         for queue in subscribers:
             loop.call_soon_threadsafe(queue.put_nowait, event)
+
+    def set_infra(
+        self,
+        run_id: str,
+        *,
+        internal_run_id: str,
+        compose_project: str,
+        subnet_base: str,
+        expected_services: list[str],
+    ) -> None:
+        """Record the provisioned range's identity so the infra endpoint can
+        find its containers. Called once, from the worker thread, as soon as
+        the compose file is rendered (before `up`)."""
+        with self._lock:
+            record = self._runs.get(run_id)
+            if record is None:
+                return
+            record.internal_run_id = internal_run_id
+            record.compose_project = compose_project
+            record.subnet_base = subnet_base
+            record.expected_services = expected_services
 
     def set_report(self, run_id: str, report: RunReport) -> None:
         with self._lock:

@@ -81,14 +81,22 @@ class AgentOrchestrator:
         on_step: StepCallback | None = None,
         blue_max_steps: int = 8,
         on_phase: Callable[[str], None] | None = None,
+        on_provisioned: Callable[[ProvisionedRange], None] | None = None,
     ) -> tuple[RunReport, ProvisionedRange]:
         """Run a full assessment: red-team attack, then blue-team review of the
         *same still-live range* before it's torn down, then deterministic
         scoring. `on_step` receives steps from both agents — each
         `TrajectoryStep.role` distinguishes which one produced it.
+
+        `on_provisioned` fires once, as soon as the range's compose file is
+        rendered (before containers start), so the caller learns the run's
+        Docker identity (project/container labels) and can report live
+        container state while `up` is still bringing the network up.
         """
         run_id = new_run_id()
         provisioned = self.engine.render_compose(scenario, run_id)
+        if on_provisioned is not None:
+            on_provisioned(provisioned)
 
         started_at = datetime.now(UTC)
         status = RunStatus.PROVISIONING

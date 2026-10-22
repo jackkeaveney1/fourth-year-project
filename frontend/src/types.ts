@@ -112,6 +112,61 @@ export interface RunStatusResponse {
   steps_so_far: number;
 }
 
+export interface RangeContainer {
+  service: string;
+  container_name: string;
+  image: string | null;
+  /** Docker container status, or "pending" when the container hasn't been created yet. */
+  status: string;
+  /** Docker healthcheck status ("healthy"/"unhealthy"/"starting") if the image defines one. */
+  health: string | null;
+  ip: string | null;
+}
+
+export interface RangeNetwork {
+  name: string | null;
+  subnet: string | null;
+  internal: boolean;
+}
+
+export interface InfrastructureResponse {
+  /** False until provisioning starts; network/containers are then populated. */
+  provisioned: boolean;
+  network: RangeNetwork | null;
+  containers: RangeContainer[];
+}
+
+export type LLMProvider = "groq" | "anthropic" | "gemini" | "aionlabs";
+
+export interface LLMSelection {
+  provider: LLMProvider;
+  model?: string | null;
+  api_key?: string | null;
+}
+
+export type ServiceRole = "web" | "db" | "internal";
+
+export interface CustomServiceSpec {
+  name: string;
+  role: ServiceRole;
+  vulnerability_ids: string[];
+  exposed_to: string[];
+}
+
+export interface CustomScenarioRequest {
+  title: string;
+  objective: string;
+  services: CustomServiceSpec[];
+}
+
+export interface ImportedScenarioRequest {
+  title: string;
+  objective: string;
+  build_context: string;
+  app_port: number;
+  include_db: boolean;
+}
+
 export interface PhaseEvent {
   event: "phase";
   phase: RunPhase;

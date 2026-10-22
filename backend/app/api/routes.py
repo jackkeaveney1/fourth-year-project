@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
+import docker
+from docker.errors import DockerException
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 from app.agents.llm_client import (
@@ -22,13 +24,40 @@ from app.agents.llm_client import (
 )
 from app.agents.orchestrator import AgentOrchestrator
 from app.config import settings
-from app.models.schemas import Difficulty, LaunchRunRequest, RunStatus, Scenario
-from app.agents.scenario_generator import generate_scenario
+from app.models.schemas import (
+    CustomScenarioRequest,
+    Difficulty,
+    ImportedScenarioRequest,
+    LaunchRunRequest,
+    LLMProvider,
+    LLMSelection,
+    RunStatus,
+    Scenario,
+    Vulnerability,
+)
+from app.agents.scenario_generator import (
+    CustomScenarioError,
+    CustomServiceInput,
+    VULNERABILITY_CATALOG,
+    build_custom_scenario,
+    build_imported_scenario,
+    generate_scenario,
+)
+from app.scenario_engine.image_builder import ImageBuildError, build_image_from_context
 from app.state import run_store, scenario_store
 
 router = APIRouter()
 _executor = ThreadPoolExecutor(max_workers=4)
 BLUE_TEAM_MAX_STEPS = 8
+
+_docker_client: docker.DockerClient | None = None
+
+
+def get_docker_client() -> docker.DockerClient:
+    global _docker_client
+    if _docker_client is None:
+        _docker_client = docker.from_env()
+    return _docker_client
 
 
 def _build_llm_client() -> LLMClient:
@@ -65,16 +94,58 @@ def _build_blue_llm_client() -> LLMClient | None:
     return None
 
 
-_orchestrator: AgentOrchestrator | None = None
+_DEFAULT_MODELS = {
+    LLMProvider.GROQ: lambda: settings.groq_model,
+    LLMProvider.ANTHROPIC: lambda: settings.anthropic_model,
+    LLMProvider.GEMINI: lambda: settings.gemini_model,
+    LLMProvider.AIONLABS: lambda: settings.aionlabs_model,
+}
+_DEFAULT_KEYS = {
+    LLMProvider.GROQ: lambda: settings.groq_api_key,
+    LLMProvider.ANTHROPIC: lambda: settings.anthropic_api_key,
+    LLMProvider.GEMINI: lambda: settings.gemini_api_key,
+    LLMProvider.AIONLABS: lambda: settings.aionlabs_api_key,
+}
+_CLIENT_CLASSES = {
+    LLMProvider.GROQ: GroqLLMClient,
+    LLMProvider.ANTHROPIC: AnthropicLLMClient,
+    LLMProvider.GEMINI: GeminiLLMClient,
+    LLMProvider.AIONLABS: AionLabsLLMClient,
+}
 
 
-def get_orchestrator() -> AgentOrchestrator:
-    global _orchestrator
-    if _orchestrator is None:
-        _orchestrator = AgentOrchestrator(
-            llm=_build_llm_client(), blue_llm=_build_blue_llm_client()
+def _build_client_from_selection(selection: LLMSelection) -> LLMClient:
+    """Builds a client for an explicit per-run provider choice.
+
+    The caller's own `api_key`, if given, is used only to construct this
+    one client (never written to disk/settings) — falls back to the
+    server-configured key for that provider when omitted.
+    """
+    api_key = (selection.api_key or "").strip() or None
+    if api_key is None:
+        api_key = _DEFAULT_KEYS[selection.provider]()
+    if api_key is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"No API key available for provider '{selection.provider.value}' — "
+                "enter one in Advanced Settings or configure it on the server."
+            ),
         )
-    return _orchestrator
+    model = selection.model or _DEFAULT_MODELS[selection.provider]()
+    return _CLIENT_CLASSES[selection.provider](model=model, api_key=api_key)
+
+
+def _resolve_red_llm(request: LaunchRunRequest) -> LLMClient:
+    if request.red_llm is not None and not settings.use_scripted_llm:
+        return _build_client_from_selection(request.red_llm)
+    return _build_llm_client()
+
+
+def _resolve_blue_llm(request: LaunchRunRequest) -> LLMClient | None:
+    if request.blue_llm is not None and not settings.use_scripted_llm:
+        return _build_client_from_selection(request.blue_llm)
+    return _build_blue_llm_client()
 
 
 @router.get("/health")
@@ -97,13 +168,69 @@ def get_scenario(scenario_id: str) -> Scenario:
     return scenario
 
 
+@router.get("/vulnerabilities", response_model=list[Vulnerability])
+def list_vulnerabilities() -> list[Vulnerability]:
+    """The catalog a custom scenario's services can be built from."""
+    return list(VULNERABILITY_CATALOG.values())
+
+
+@router.post("/scenarios/custom", response_model=Scenario)
+def create_custom_scenario(request: CustomScenarioRequest) -> Scenario:
+    try:
+        scenario = build_custom_scenario(
+            title=request.title,
+            objective=request.objective,
+            services=[
+                CustomServiceInput(
+                    name=s.name,
+                    role=s.role,
+                    vulnerability_ids=s.vulnerability_ids,
+                    exposed_to=s.exposed_to,
+                )
+                for s in request.services
+            ],
+        )
+    except CustomScenarioError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    scenario_store.add(scenario)
+    return scenario
+
+
+@router.post("/scenarios/imported", response_model=Scenario)
+def create_imported_scenario(request: ImportedScenarioRequest) -> Scenario:
+    """Build an image from the user's own build context and wrap it as a scenario.
+
+    The built image becomes the `web` entry point, so the per-run SUCCESS_MARKER
+    is injected into it and goal-checking/scoring run through the same path as
+    the built-in targets (see build_imported_scenario). A bad path or failing
+    `docker build` surfaces as a 400 with the build-log tail, not a 500.
+    """
+    try:
+        image = build_image_from_context(request.build_context, get_docker_client())
+    except ImageBuildError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    scenario = build_imported_scenario(
+        title=request.title,
+        objective=request.objective,
+        image=image,
+        app_port=request.app_port,
+        include_db=request.include_db,
+    )
+    scenario_store.add(scenario)
+    return scenario
+
+
 @router.post("/runs")
 async def launch_run(request: LaunchRunRequest) -> dict[str, str]:
     scenario = scenario_store.get(request.scenario_id)
     if scenario is None:
         raise HTTPException(status_code=404, detail="Scenario not found")
 
-    orchestrator = get_orchestrator()
+    # Built fresh per request (not cached) since red_llm/blue_llm can select a
+    # different provider/model/key on every launch.
+    red_llm = _resolve_red_llm(request)
+    blue_llm = _resolve_blue_llm(request)
+    orchestrator = AgentOrchestrator(llm=red_llm, docker_client=get_docker_client(), blue_llm=blue_llm)
     loop = asyncio.get_running_loop()
 
     # run_id is only known once the orchestrator generates it inside
@@ -127,6 +254,17 @@ async def launch_run(request: LaunchRunRequest) -> dict[str, str]:
         max_steps = BLUE_TEAM_MAX_STEPS if phase == "assessing" else None
         run_store.set_phase(pending_id, phase, max_steps=max_steps)
 
+    def on_provisioned(provisioned) -> None:
+        # "attacker" first — it's the agents' operating box, always present —
+        # then the scenario's own services in topology order.
+        run_store.set_infra(
+            pending_id,
+            internal_run_id=provisioned.run_id,
+            compose_project=provisioned.project_name,
+            subnet_base=provisioned.subnet_base,
+            expected_services=["attacker", *(s.name for s in scenario.services)],
+        )
+
     def work() -> None:
         run_store.set_phase(pending_id, "provisioning")
         report, _provisioned = orchestrator.run_red_team(
@@ -134,6 +272,7 @@ async def launch_run(request: LaunchRunRequest) -> dict[str, str]:
             request,
             on_step=on_step,
             on_phase=on_phase,
+            on_provisioned=on_provisioned,
             blue_max_steps=BLUE_TEAM_MAX_STEPS,
         )
         # The orchestrator mints its own internal run_id for container/network
@@ -159,6 +298,76 @@ def get_run(run_id: str) -> dict:
         "max_steps": record.max_steps,
         "report": record.report,
         "steps_so_far": len(record.trajectory_so_far),
+    }
+
+
+@router.get("/runs/{run_id}/infrastructure")
+def get_infrastructure(run_id: str) -> dict:
+    """Live state of the Docker containers + isolated network for a run.
+
+    Read-only: queries Docker by the `cyber_range.run` label the compose
+    template stamps on every container. Returns a row per *expected* service
+    so a container that hasn't come up yet shows as "pending" rather than
+    being omitted. Once a run is torn down the containers are gone, so this
+    goes back to all-pending/empty — that's expected, the final topology
+    lives in the run report.
+    """
+    record = run_store.get(run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    if record.internal_run_id is None:
+        # Provisioning hasn't started yet (or this run never provisions).
+        return {"provisioned": False, "network": None, "containers": []}
+
+    subnet = f"{record.subnet_base}.0/24" if record.subnet_base else None
+    try:
+        containers = get_docker_client().containers.list(
+            all=True, filters={"label": f"cyber_range.run={record.internal_run_id}"}
+        )
+    except DockerException:
+        containers = []
+
+    found: dict[str, dict] = {}
+    network_name: str | None = None
+    for container in containers:
+        service = container.labels.get("com.docker.compose.service") or container.name.removeprefix(
+            f"{record.internal_run_id}-"
+        )
+        state = container.attrs.get("State", {})
+        health = (state.get("Health") or {}).get("Status")
+        ip: str | None = None
+        networks = container.attrs.get("NetworkSettings", {}).get("Networks", {})
+        for net_name, meta in networks.items():
+            network_name = net_name
+            ip = meta.get("IPAddress") or (meta.get("IPAMConfig") or {}).get("IPv4Address")
+        found[service] = {
+            "service": service,
+            "container_name": container.name,
+            "image": container.attrs.get("Config", {}).get("Image"),
+            "status": container.status,
+            "health": health,
+            "ip": ip or None,
+        }
+
+    def pending(service: str) -> dict:
+        return {
+            "service": service,
+            "container_name": f"{record.internal_run_id}-{service}",
+            "image": None,
+            "status": "pending",
+            "health": None,
+            "ip": None,
+        }
+
+    ordered = [found.get(service, pending(service)) for service in record.expected_services]
+    # Surface anything running under this run's label that we didn't expect.
+    ordered.extend(info for service, info in found.items() if service not in record.expected_services)
+
+    return {
+        "provisioned": True,
+        "network": {"name": network_name, "subnet": subnet, "internal": True},
+        "containers": ordered,
     }
 
 

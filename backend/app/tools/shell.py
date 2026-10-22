@@ -28,8 +28,12 @@ class RunCommandTool(Tool):
         self.spec = ToolSpec(
             name="run_shell",
             description=(
-                "Run a shell command inside the attacker's own sandboxed "
-                "container (not the target or the host)."
+                "Run ONE command inside the attacker's own sandboxed container "
+                "(not the target or the host). This execs the binary and its "
+                "arguments directly — there is NO shell, so loops (for/while), "
+                "pipes (|), redirection (>), and globs will NOT work. Allowed "
+                f"binaries: {sorted(ALLOWED_BINARIES)}. To try many paths, call "
+                "this tool once per path instead of writing a loop."
             ),
             parameters={
                 "type": "object",
